@@ -7,6 +7,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -122,8 +123,24 @@ func (app *App) Sync(days int) error {
 		return nil
 	}
 
+	log.Println("Розрахунок стану бюджету для промпту...")
+	budgetStatus, err := app.CalculateBudgetStatus(now)
+	if err != nil {
+		log.Printf("Попередження: не вдалося розрахувати бюджет: %v", err)
+	}
+
+	obligationsDue, err := app.storage.ObligationsDueThisMonth(now)
+	if err != nil {
+		log.Printf("Попередження: не вдалося отримати обов'язкові платежі: %v", err)
+	}
+
+	pendingPlanned, err := app.storage.ListPlannedExpenses("pending")
+	if err != nil {
+		log.Printf("Попередження: не вдалося отримати заплановані витрати: %v", err)
+	}
+
 	log.Println("Формування аналітичного промпту для Gemini...")
-	prompt := app.buildAnalysisPrompt(txsToAnalyze)
+	prompt := app.buildAnalysisPrompt(txsToAnalyze, budgetStatus, obligationsDue, pendingPlanned)
 
 	log.Println("Запит аналізу у Gemini AI...")
 	report, err := app.llm.Analyze(prompt)
@@ -136,15 +153,156 @@ func (app *App) Sync(days int) error {
 		return fmt.Errorf("помилка надсилання в Telegram: %w", err)
 	}
 
+	if budgetStatus.HasIncome {
+		if err := app.tg.SendMessage(app.formatBudgetStatus(budgetStatus)); err != nil {
+			log.Printf("Помилка надсилання статусу бюджету: %v", err)
+		}
+	}
+
 	log.Println("Синхронізацію успішно завершено!")
 	return nil
 }
 
-// buildAnalysisPrompt формує структурований запит до штучного інтелекту
-func (app *App) buildAnalysisPrompt(txs []storage.Transaction) string {
-	var sb strings.Builder
-	sb.WriteString("Ти — професійний фінансовий радник. Проаналізуй наступні транзакції користувача та дай короткі, корисні та дієві поради щодо оптимізації бюджету українською мовою. Форматуй відповідь у красивому Markdown для Telegram (використовуй жирний текст, списки, але уникай складного форматування).\n\nТранзакції:\n")
+// BudgetStatus описує розрахований стан бюджету на поточний місяць
+type BudgetStatus struct {
+	HasIncome            bool
+	MonthlyIncomeCents   int64
+	ObligationsCents     int64
+	ApprovedPlannedCents int64
+	SpentCents           int64
+	RemainingCents       int64
+	DaysLeftInMonth      int
+	SuggestedDailyLimit  int64
+}
 
+// CalculateBudgetStatus рахує, скільки коштів лишається на місяць з урахуванням
+// доходу, обов'язкових платежів цього місяця та вже витраченого
+func (app *App) CalculateBudgetStatus(now time.Time) (BudgetStatus, error) {
+	var status BudgetStatus
+
+	incomeStr, ok, err := app.storage.GetSetting(settingMonthlyIncome)
+	if err != nil {
+		return status, fmt.Errorf("помилка читання доходу: %w", err)
+	}
+	status.HasIncome = ok
+	if !ok {
+		return status, nil
+	}
+
+	income, err := strconv.ParseInt(incomeStr, 10, 64)
+	if err != nil {
+		return status, fmt.Errorf("некоректне значення доходу в налаштуваннях: %w", err)
+	}
+	status.MonthlyIncomeCents = income
+
+	obligations, err := app.storage.ObligationsDueThisMonth(now)
+	if err != nil {
+		return status, fmt.Errorf("помилка отримання обов'язків: %w", err)
+	}
+	for _, o := range obligations {
+		status.ObligationsCents += o.Amount
+	}
+
+	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+	monthEnd := monthStart.AddDate(0, 1, 0)
+
+	spent, err := app.storage.SumTransactionsInRange(monthStart.Unix(), monthEnd.Unix(), "expense")
+	if err != nil {
+		return status, fmt.Errorf("помилка підрахунку витрат: %w", err)
+	}
+	status.SpentCents = -spent // expense зберігається від'ємним
+
+	approvedPlanned, err := app.storage.SumPlannedExpensesByStatus("approved")
+	if err != nil {
+		return status, fmt.Errorf("помилка підрахунку підтверджених планових витрат: %w", err)
+	}
+	status.ApprovedPlannedCents = approvedPlanned
+
+	status.RemainingCents = status.MonthlyIncomeCents - status.ObligationsCents - status.SpentCents - status.ApprovedPlannedCents
+
+	totalDaysInMonth := int(monthEnd.Sub(monthStart).Hours() / 24)
+	daysLeft := totalDaysInMonth - now.Day() + 1
+	if daysLeft < 1 {
+		daysLeft = 1
+	}
+	status.DaysLeftInMonth = daysLeft
+
+	if status.RemainingCents > 0 {
+		status.SuggestedDailyLimit = status.RemainingCents / int64(daysLeft)
+	}
+
+	return status, nil
+}
+
+// formatBudgetStatus форматує BudgetStatus у текстове повідомлення для Telegram
+func (app *App) formatBudgetStatus(s BudgetStatus) string {
+	if !s.HasIncome {
+		return "Місячний дохід не встановлено. Використай /setincome <сума>, щоб я міг рахувати бюджет."
+	}
+
+	var sb strings.Builder
+	sb.WriteString("💰 *Стан бюджету цього місяця*\n")
+	sb.WriteString(fmt.Sprintf("Дохід: %.2f грн\n", float64(s.MonthlyIncomeCents)/100))
+	sb.WriteString(fmt.Sprintf("Обов'язкові платежі цього місяця: %.2f грн\n", float64(s.ObligationsCents)/100))
+	if s.ApprovedPlannedCents > 0 {
+		sb.WriteString(fmt.Sprintf("Підтверджені заплановані витрати: %.2f грн\n", float64(s.ApprovedPlannedCents)/100))
+	}
+	sb.WriteString(fmt.Sprintf("Витрачено цього місяця: %.2f грн\n", float64(s.SpentCents)/100))
+	sb.WriteString(fmt.Sprintf("Днів до кінця місяця: %d\n", s.DaysLeftInMonth))
+
+	if s.RemainingCents > 0 {
+		sb.WriteString(fmt.Sprintf("Залишок до кінця місяця: %.2f грн\n", float64(s.RemainingCents)/100))
+		sb.WriteString(fmt.Sprintf("📊 Рекомендований ліміт на день: %.2f грн", float64(s.SuggestedDailyLimit)/100))
+	} else {
+		sb.WriteString(fmt.Sprintf("⚠️ За поточними обов'язками і витратами прогнозований мінус до кінця місяця: %.2f грн", -float64(s.RemainingCents)/100))
+	}
+
+	return sb.String()
+}
+
+// buildAnalysisPrompt формує структурований запит до штучного інтелекту.
+// Крім самих транзакцій, включає поточний стан бюджету, обов'язкові платежі та
+// заплановані разові витрати, щоб порада ШІ враховувала реальну картину, а не лише список покупок.
+func (app *App) buildAnalysisPrompt(txs []storage.Transaction, status BudgetStatus, obligations []storage.Obligation, pendingPlanned []storage.PlannedExpense) string {
+	var sb strings.Builder
+	sb.WriteString("Ти — особистий фінансовий радник користувача. Проаналізуй нові транзакції у контексті його бюджету на місяць і дай короткі, конкретні та дієві поради українською мовою: чи вкладається він у бюджет, чи є ризик вийти в мінус, і чи можна собі щось дозволити найближчим часом. Форматуй відповідь у Markdown для Telegram (жирний текст, списки), уникай складного форматування та зайвої води.\n\n")
+
+	if status.HasIncome {
+		sb.WriteString("### Бюджет на цей місяць\n")
+		sb.WriteString(fmt.Sprintf("- Дохід: %.2f грн\n", float64(status.MonthlyIncomeCents)/100))
+		sb.WriteString(fmt.Sprintf("- Обов'язкові платежі цього місяця: %.2f грн\n", float64(status.ObligationsCents)/100))
+		if status.ApprovedPlannedCents > 0 {
+			sb.WriteString(fmt.Sprintf("- Підтверджені заплановані витрати: %.2f грн\n", float64(status.ApprovedPlannedCents)/100))
+		}
+		sb.WriteString(fmt.Sprintf("- Витрачено цього місяця: %.2f грн\n", float64(status.SpentCents)/100))
+		sb.WriteString(fmt.Sprintf("- Днів до кінця місяця: %d\n", status.DaysLeftInMonth))
+		if status.RemainingCents > 0 {
+			sb.WriteString(fmt.Sprintf("- Вільний залишок: %.2f грн (~%.2f грн/день)\n", float64(status.RemainingCents)/100, float64(status.SuggestedDailyLimit)/100))
+		} else {
+			sb.WriteString(fmt.Sprintf("- УВАГА: прогнозований мінус до кінця місяця: %.2f грн\n", -float64(status.RemainingCents)/100))
+		}
+		sb.WriteString("\n")
+	} else {
+		sb.WriteString("### Бюджет\nМісячний дохід не налаштовано, тому оцінюй ситуацію лише за динамікою витрат.\n\n")
+	}
+
+	if len(obligations) > 0 {
+		sb.WriteString("### Обов'язкові платежі цього місяця\n")
+		for _, o := range obligations {
+			sb.WriteString(fmt.Sprintf("- %s: %.2f грн (дата: %s)\n", o.Name, float64(o.Amount)/100, o.NextDueDate))
+		}
+		sb.WriteString("\n")
+	}
+
+	if len(pendingPlanned) > 0 {
+		sb.WriteString("### Заплановані разові витрати, що очікують рішення користувача\n")
+		for _, p := range pendingPlanned {
+			sb.WriteString(fmt.Sprintf("- %s: %.2f грн\n", p.Name, float64(p.Amount)/100))
+		}
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString("### Нові транзакції\n")
 	for _, tx := range txs {
 		amountFormatted := float64(tx.Amount) / 100.0
 		sign := "-"
@@ -152,8 +310,9 @@ func (app *App) buildAnalysisPrompt(txs []storage.Transaction) string {
 			sign = "+"
 		}
 		timeStr := time.Unix(tx.Timestamp, 0).Format("02.01 15:04")
-		sb.WriteString(fmt.Sprintf("- [%s] %s: %s%.2f UAH (MCC: %d, %s)\n",
-			timeStr, tx.Description, sign, math.Abs(amountFormatted), tx.MCC, tx.Type))
+		category := monobank.CategoryForMCC(tx.MCC)
+		sb.WriteString(fmt.Sprintf("- [%s] %s: %s%.2f UAH (категорія: %s, %s)\n",
+			timeStr, tx.Description, sign, math.Abs(amountFormatted), category, tx.Type))
 	}
 
 	return sb.String()
@@ -188,30 +347,244 @@ func (app *App) handleTelegramWebhook(w http.ResponseWriter, r *http.Request) {
 	if update.Message != nil && update.Message.Text != "" {
 		log.Printf("Отримано повідомлення від чату %d: %s", update.Message.Chat.ID, update.Message.Text)
 
-		// Архітектурний заділ для команд:
-		// cmd := update.Message.Text
-		// if err := app.processCommand(update.Message.Chat.ID, cmd); err != nil {
-		//     log.Printf("Помилка обробки команди: %v", err)
-		// }
+		if err := app.processCommand(update.Message.Chat.ID, update.Message.Text); err != nil {
+			log.Printf("Помилка обробки команди: %v", err)
+		}
 	}
 
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("OK"))
 }
 
-// processCommand оброблятиме команди боту у майбутньому
+// settingMonthlyIncome — ключ у таблиці settings для очікуваного місячного доходу (у копійках)
+const settingMonthlyIncome = "monthly_income"
+
+// parseAmountToCents перетворює введену користувачем суму (напр. "45000" або "45000.50") у копійки
+func parseAmountToCents(s string) (int64, error) {
+	value, err := strconv.ParseFloat(strings.ReplaceAll(s, ",", "."), 64)
+	if err != nil || value <= 0 {
+		return 0, fmt.Errorf("некоректна сума: %s", s)
+	}
+	return int64(math.Round(value * 100)), nil
+}
+
+// processCommand обробляє текстові команди, що надходять від Telegram бота
 func (app *App) processCommand(chatID int64, text string) error {
-	// Приклад архітектурного розширення:
-	// text = strings.TrimSpace(text)
-	// switch text {
-	// case "/sync":
-	//     return app.Sync(7)
-	// case "/stats":
-	//     return app.tg.SendMessage("Статистика буде реалізована найближчим часом!")
-	// default:
-	//     return app.tg.SendMessage("Я розумію лише команди /sync та /stats")
-	// }
-	return nil
+	text = strings.TrimSpace(text)
+	if !strings.HasPrefix(text, "/") {
+		return nil
+	}
+
+	parts := strings.Fields(text)
+	cmd := parts[0]
+
+	switch cmd {
+	case "/setincome":
+		if len(parts) != 2 {
+			return app.tg.SendMessage("Використання: /setincome <сума у грн>, напр. /setincome 45000")
+		}
+		cents, err := parseAmountToCents(parts[1])
+		if err != nil {
+			return app.tg.SendMessage("Некоректна сума. Приклад: /setincome 45000")
+		}
+		if err := app.storage.SetSetting(settingMonthlyIncome, strconv.FormatInt(cents, 10)); err != nil {
+			return fmt.Errorf("помилка збереження доходу: %w", err)
+		}
+		return app.tg.SendMessage(fmt.Sprintf("✅ Місячний дохід встановлено: %.2f грн", float64(cents)/100))
+
+	case "/income":
+		value, ok, err := app.storage.GetSetting(settingMonthlyIncome)
+		if err != nil {
+			return fmt.Errorf("помилка читання доходу: %w", err)
+		}
+		if !ok {
+			return app.tg.SendMessage("Місячний дохід ще не встановлено. Використай /setincome <сума>")
+		}
+		cents, _ := strconv.ParseInt(value, 10, 64)
+		return app.tg.SendMessage(fmt.Sprintf("Поточний місячний дохід: %.2f грн", float64(cents)/100))
+
+	case "/addobligation":
+		args := parts[1:]
+		if len(args) < 4 {
+			return app.tg.SendMessage("Використання: /addobligation <назва> <сума> <інтервал_міс> <дата YYYY-MM-DD>\nПриклад: /addobligation Батьки 4000 1 2026-10-01")
+		}
+
+		dateStr := args[len(args)-1]
+		intervalStr := args[len(args)-2]
+		amountStr := args[len(args)-3]
+		name := strings.Join(args[:len(args)-3], " ")
+
+		amountCents, err := parseAmountToCents(amountStr)
+		if err != nil {
+			return app.tg.SendMessage("Некоректна сума. Приклад: /addobligation Батьки 4000 1 2026-10-01")
+		}
+
+		interval, err := strconv.Atoi(intervalStr)
+		if err != nil || interval <= 0 {
+			return app.tg.SendMessage("Некоректний інтервал — очікується додатне число місяців (1 = щомісяця, 3 = раз на 3 місяці).")
+		}
+
+		if _, err := time.Parse("2006-01-02", dateStr); err != nil {
+			return app.tg.SendMessage("Некоректна дата наступного платежу. Формат: YYYY-MM-DD")
+		}
+
+		id, err := app.storage.AddObligation(name, amountCents, interval, dateStr)
+		if err != nil {
+			return fmt.Errorf("помилка збереження обов'язку: %w", err)
+		}
+		return app.tg.SendMessage(fmt.Sprintf("✅ Додано обов'язок #%d: %s — %.2f грн кожні %d міс. (наступний платіж: %s)",
+			id, name, float64(amountCents)/100, interval, dateStr))
+
+	case "/listobligations":
+		obligations, err := app.storage.ListObligations(true)
+		if err != nil {
+			return fmt.Errorf("помилка отримання обов'язків: %w", err)
+		}
+		if len(obligations) == 0 {
+			return app.tg.SendMessage("Активних обов'язкових платежів немає. Додай через /addobligation.")
+		}
+
+		var sb strings.Builder
+		sb.WriteString("📋 Активні обов'язкові платежі:\n")
+		for _, o := range obligations {
+			sb.WriteString(fmt.Sprintf("#%d %s — %.2f грн кожні %d міс. (наступний: %s)\n",
+				o.ID, o.Name, float64(o.Amount)/100, o.IntervalMonths, o.NextDueDate))
+		}
+		return app.tg.SendMessage(sb.String())
+
+	case "/removeobligation":
+		if len(parts) != 2 {
+			return app.tg.SendMessage("Використання: /removeobligation <id> (id дивись у /listobligations)")
+		}
+		id, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil {
+			return app.tg.SendMessage("Некоректний ID.")
+		}
+		if err := app.storage.DeleteObligation(id); err != nil {
+			return fmt.Errorf("помилка видалення обов'язку: %w", err)
+		}
+		return app.tg.SendMessage(fmt.Sprintf("🗑 Обов'язок #%d видалено.", id))
+
+	case "/status":
+		status, err := app.CalculateBudgetStatus(time.Now())
+		if err != nil {
+			return fmt.Errorf("помилка розрахунку бюджету: %w", err)
+		}
+		return app.tg.SendMessage(app.formatBudgetStatus(status))
+
+	case "/addplanned":
+		args := parts[1:]
+		if len(args) < 2 {
+			return app.tg.SendMessage("Використання: /addplanned <назва> <сума>\nПриклад: /addplanned Подарунок другу 5000")
+		}
+
+		amountStr := args[len(args)-1]
+		name := strings.Join(args[:len(args)-1], " ")
+
+		amountCents, err := parseAmountToCents(amountStr)
+		if err != nil {
+			return app.tg.SendMessage("Некоректна сума. Приклад: /addplanned Подарунок другу 5000")
+		}
+
+		id, err := app.storage.AddPlannedExpense(name, amountCents, "")
+		if err != nil {
+			return fmt.Errorf("помилка збереження запланованої витрати: %w", err)
+		}
+
+		status, err := app.CalculateBudgetStatus(time.Now())
+		if err != nil {
+			return fmt.Errorf("помилка розрахунку бюджету: %w", err)
+		}
+
+		return app.tg.SendMessage(app.formatPlannedExpenseVerdict(id, name, amountCents, status))
+
+	case "/confirmplanned":
+		if len(parts) != 2 {
+			return app.tg.SendMessage("Використання: /confirmplanned <id>")
+		}
+		id, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil {
+			return app.tg.SendMessage("Некоректний ID.")
+		}
+		if err := app.storage.UpdatePlannedExpenseStatus(id, "approved"); err != nil {
+			return fmt.Errorf("помилка підтвердження запланованої витрати: %w", err)
+		}
+		return app.tg.SendMessage(fmt.Sprintf("✅ Заплановану витрату #%d підтверджено — врахую її в бюджеті цього місяця.", id))
+
+	case "/cancelplanned":
+		if len(parts) != 2 {
+			return app.tg.SendMessage("Використання: /cancelplanned <id>")
+		}
+		id, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil {
+			return app.tg.SendMessage("Некоректний ID.")
+		}
+		if err := app.storage.UpdatePlannedExpenseStatus(id, "rejected"); err != nil {
+			return fmt.Errorf("помилка скасування запланованої витрати: %w", err)
+		}
+		return app.tg.SendMessage(fmt.Sprintf("🗑 Заплановану витрату #%d скасовано.", id))
+
+	case "/listplanned":
+		pending, err := app.storage.ListPlannedExpenses("pending")
+		if err != nil {
+			return fmt.Errorf("помилка отримання планових витрат: %w", err)
+		}
+		approved, err := app.storage.ListPlannedExpenses("approved")
+		if err != nil {
+			return fmt.Errorf("помилка отримання планових витрат: %w", err)
+		}
+		if len(pending) == 0 && len(approved) == 0 {
+			return app.tg.SendMessage("Немає активних запланованих витрат.")
+		}
+
+		var sb strings.Builder
+		if len(pending) > 0 {
+			sb.WriteString("⏳ Очікують рішення:\n")
+			for _, p := range pending {
+				sb.WriteString(fmt.Sprintf("#%d %s — %.2f грн\n", p.ID, p.Name, float64(p.Amount)/100))
+			}
+			sb.WriteString("\n")
+		}
+		if len(approved) > 0 {
+			sb.WriteString("✅ Підтверджені (враховані в бюджеті):\n")
+			for _, p := range approved {
+				sb.WriteString(fmt.Sprintf("#%d %s — %.2f грн\n", p.ID, p.Name, float64(p.Amount)/100))
+			}
+		}
+		return app.tg.SendMessage(sb.String())
+
+	default:
+		return app.tg.SendMessage("Невідома команда. Доступно: /setincome, /income, /addobligation, /listobligations, /removeobligation, /status, /addplanned, /confirmplanned, /cancelplanned, /listplanned")
+	}
+}
+
+// formatPlannedExpenseVerdict формує пораду щодо запланованої разової витрати.
+// Це саме порада, а не заборона — остаточне рішення завжди за користувачем.
+func (app *App) formatPlannedExpenseVerdict(id int64, name string, amountCents int64, status BudgetStatus) string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("🎁 Запланована витрата #%d: %s — %.2f грн\n\n", id, name, float64(amountCents)/100))
+
+	if !status.HasIncome {
+		sb.WriteString("Я не знаю твій місячний дохід (/setincome), тому не можу оцінити підйомність — записав, але рішення за тобою.")
+		return sb.String()
+	}
+
+	sb.WriteString(fmt.Sprintf("Вільно до кінця місяця (з урахуванням обов'язків, витрат і вже підтверджених планів): %.2f грн на %d днів.\n\n",
+		float64(status.RemainingCents)/100, status.DaysLeftInMonth))
+
+	if status.RemainingCents >= amountCents {
+		afterCents := status.RemainingCents - amountCents
+		perDay := float64(afterCents) / float64(status.DaysLeftInMonth) / 100
+		sb.WriteString(fmt.Sprintf("✅ Це підйомно: після цієї витрати лишиться %.2f грн (~%.2f грн/день) до кінця місяця.",
+			float64(afterCents)/100, perDay))
+	} else {
+		affordableNow := math.Max(0, float64(status.RemainingCents)/100)
+		sb.WriteString(fmt.Sprintf("⚠️ Це більше, ніж вільний залишок. Без шкоди для інших витрат зараз можна виділити приблизно %.2f грн.\n", affordableNow))
+		sb.WriteString("Це не заборона — можеш свідомо скоротити щось інше цього місяця і виконати повну суму, або зменшити суму зараз. Рішення за тобою.\n")
+	}
+
+	sb.WriteString(fmt.Sprintf("\nЩоб врахувати цю витрату в бюджеті: /confirmplanned %d\nЩоб скасувати: /cancelplanned %d", id, id))
+	return sb.String()
 }
 
 func main() {
@@ -280,6 +653,15 @@ func main() {
 		}
 
 		days := 7 // За замовчуванням беремо виписку за останній тиждень, якщо БД порожня
+		if daysParam := r.URL.Query().Get("days"); daysParam != "" {
+			parsedDays, err := strconv.Atoi(daysParam)
+			if err != nil || parsedDays <= 0 {
+				http.Error(w, "Некоректний параметр days: очікується додатне число", http.StatusBadRequest)
+				return
+			}
+			days = parsedDays
+		}
+
 		err := app.Sync(days)
 		if err != nil {
 			log.Printf("Помилка під час синхронізації: %v", err)
