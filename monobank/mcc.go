@@ -84,6 +84,21 @@ var mccCategories = map[int]string{
 	// Travel
 	7011: "Hotels",
 	4722: "Travel agencies",
+
+	// Transfers
+	4829: "Card-to-card transfer (P2P)",
+
+	// Miscellaneous stores and services
+	5310: "Discount stores",
+	5331: "Variety stores",
+	5251: "Hardware/hobby stores",
+	5262: "Online marketplaces",
+	5931: "Secondhand/thrift stores",
+	5977: "Cosmetics stores",
+	7941: "Sports clubs/facilities",
+	7399: "Business services",
+	8999: "Professional services",
+	9402: "Postal services",
 }
 
 // CategoryForMCC returns a human-readable category name by MCC code.

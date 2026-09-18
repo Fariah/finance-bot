@@ -45,7 +45,7 @@ func NewClient(apiKey string) *Client {
 	return &Client{
 		apiKey: apiKey,
 		httpClient: &http.Client{
-			Timeout: 15 * time.Second,
+			Timeout: 60 * time.Second,
 		},
 	}
 }
@@ -54,7 +54,7 @@ func NewClient(apiKey string) *Client {
 func (c *Client) Analyze(prompt string) (string, error) {
 	reqBody := claudeRequest{
 		Model:     claudeModel,
-		MaxTokens: 1024,
+		MaxTokens: 4096,
 		Messages: []claudeMsg{
 			{
 				Role:    "user",

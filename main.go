@@ -6,6 +6,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -25,13 +26,18 @@ type App struct {
 	tg          *telegram.Client
 	llm         *llm.Client
 	monoAccount string
+	reportsDir  string
 }
 
 // NewApp initializes and returns a new App instance
-func NewApp(dbPath, monoToken, monoAccount, tgToken, tgChatID, anthropicKey string) (*App, error) {
+func NewApp(dbPath, monoToken, monoAccount, tgToken, tgChatID, anthropicKey, reportsDir string) (*App, error) {
 	store, err := storage.NewStorage(dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("storage initialization error: %w", err)
+	}
+
+	if err := os.MkdirAll(reportsDir, 0755); err != nil {
+		return nil, fmt.Errorf("error creating reports directory: %w", err)
 	}
 
 	return &App{
@@ -40,7 +46,20 @@ func NewApp(dbPath, monoToken, monoAccount, tgToken, tgChatID, anthropicKey stri
 		tg:          telegram.NewClient(tgToken, tgChatID),
 		llm:         llm.NewClient(anthropicKey),
 		monoAccount: monoAccount,
+		reportsDir:  reportsDir,
 	}, nil
+}
+
+// saveReportToFile writes the full analysis text to a timestamped file on disk,
+// since the Telegram message is capped at 4096 characters and can get rejected or cut off.
+func (app *App) saveReportToFile(report string) error {
+	filename := fmt.Sprintf("analysis_%s.md", time.Now().Format("2006-01-02_15-04-05"))
+	path := filepath.Join(app.reportsDir, filename)
+	if err := os.WriteFile(path, []byte(report), 0644); err != nil {
+		return fmt.Errorf("error writing report file: %w", err)
+	}
+	log.Printf("Report saved to %s", path)
+	return nil
 }
 
 // Sync fetches new transactions from Monobank and saves to DB, then analyzes current month data
@@ -60,7 +79,14 @@ func (app *App) Sync(days int) error {
 	if latestTime > 0 {
 		from = latestTime + 1
 	} else {
-		from = now.AddDate(0, 0, -days).Unix()
+		// Empty database: backfill from the start of the current month so budget
+		// calculations for this month aren't missing early transactions,
+		// instead of relying on a fixed "days" window.
+		monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+		from = monthStart.Unix()
+		if fallback := now.AddDate(0, 0, -days).Unix(); fallback < from {
+			from = fallback
+		}
 	}
 
 	// Monobank limit: no more than 31 days per request
@@ -157,6 +183,10 @@ func (app *App) Sync(days int) error {
 	report, err := app.llm.Analyze(prompt)
 	if err != nil {
 		return fmt.Errorf("error generating analytics: %w", err)
+	}
+
+	if err := app.saveReportToFile(report); err != nil {
+		log.Printf("Warning: failed to save report to file: %v", err)
 	}
 
 	log.Println("Sending report to Telegram...")
@@ -346,6 +376,7 @@ func (app *App) buildAnalysisPrompt(txs []storage.Transaction, status BudgetStat
 	sb.WriteString("Income: ~$3500/month. Mandatory monthly savings: $8000 UAH (investment fund + family support).\n")
 	sb.WriteString("If spending is growing by category - RED FLAG, needs cutting.\n")
 	sb.WriteString("Be CRITICAL and SPECIFIC. Format as Markdown for Telegram, concise and direct. Write in Ukranian\n\n")
+	sb.WriteString("Note on categories: \"Card-to-card transfer (P2P)\" is Monobank's generic code for money sent to another person's card. It has no merchant data, so you cannot know what it was spent on beyond \"transfer\". Do not guess or invent a purpose for it — just report the total and flag it if the volume looks unusually large, but do not treat it as a normal spending category to analyze like groceries or entertainment.\n\n")
 
 	if status.HasIncome {
 		sb.WriteString("### Budget Analysis\n")
@@ -678,6 +709,11 @@ func main() {
 		dbPath = "finance-bot.db"
 	}
 
+	reportsDir := os.Getenv("REPORTS_DIR")
+	if reportsDir == "" {
+		reportsDir = "reports"
+	}
+
 	monoToken := os.Getenv("MONOBANK_TOKEN")
 	monoAccount := os.Getenv("MONOBANK_ACCOUNT_ID")
 	tgToken := os.Getenv("TELEGRAM_BOT_TOKEN")
@@ -711,7 +747,7 @@ func main() {
 	var initErr error
 
 	if len(missing) == 0 {
-		app, initErr = NewApp(dbPath, monoToken, monoAccount, tgToken, tgChatID, anthropicKey)
+		app, initErr = NewApp(dbPath, monoToken, monoAccount, tgToken, tgChatID, anthropicKey, reportsDir)
 		if initErr != nil {
 			log.Fatalf("Error initializing app: %v", initErr)
 		}
