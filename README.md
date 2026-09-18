@@ -138,20 +138,36 @@ Expects JSON in Telegram webhook format:
 ### Project Structure
 ```
 finance-bot/
-├── main.go              # App orchestrator, HTTP handlers, business logic
+├── main.go                      # HTTP server and request handlers
 ├── storage/
-│   └── sqlite.go        # SQLite database layer (transactions, obligations, settings)
+│   └── sqlite.go                # SQLite database layer
 ├── monobank/
-│   ├── client.go        # Monobank API HTTP client
-│   └── mcc.go           # MCC code to category mapping
+│   ├── client.go                # Monobank API integration
+│   └── mcc.go                   # Merchant category mapping
 ├── telegram/
-│   └── client.go        # Telegram Bot API HTTP client
+│   └── client.go                # Telegram Bot API client
 ├── llm/
-│   └── client.go        # Google Gemini API HTTP client
-├── .env.example         # Environment variables template
-├── CLAUDE.md            # Development guidelines
-└── README.md            # This file
+│   └── client.go                # Google Gemini AI integration
+├── fly.toml                     # Fly.io configuration
+├── FLY_DEPLOYMENT.md            # Deployment guide
+├── CLAUDE.md                    # Development guidelines
+├── .env.example                 # Environment template
+└── README.md                    # This file
 ```
+
+### Synchronization Flow
+
+**Manual Sync (Anytime):**
+1. User/Scheduler makes HTTP request to `GET /sync?days=7`
+2. App fetches transactions from Monobank
+3. App analyzes with Gemini AI
+4. Results saved to database
+5. Report sent to Telegram
+
+**Scheduled Sync (Daily at 8 AM UTC):**
+- Fly Machines scheduler triggers `/sync` endpoint automatically
+- No internal cron job needed
+- Reliable even if main app restarts
 
 ### Core Components
 
@@ -266,33 +282,37 @@ curl -X POST http://localhost:8080/telegram/webhook \
 
 ## Deployment
 
-### Fly.io
-The app includes a `/health` endpoint that Fly.io uses for health checks. Set the following environment variables in your Fly app:
+### Fly.io (Recommended)
+
+For detailed deployment instructions, see [FLY_DEPLOYMENT.md](FLY_DEPLOYMENT.md).
+
+**Quick start:**
 
 ```bash
+# Launch app on Fly.io
+flyctl launch
+
+# Set secrets
 flyctl secrets set \
   MONOBANK_TOKEN=your_token \
   MONOBANK_ACCOUNT_ID=your_account \
   TELEGRAM_BOT_TOKEN=your_bot_token \
   TELEGRAM_CHAT_ID=your_chat_id \
   GEMINI_API_KEY=your_key
+
+# Create persistent volume for SQLite database
+flyctl volumes create finance_db --size 1
+
+# Deploy
+flyctl deploy
 ```
 
-### Docker
-To containerize the app:
-```dockerfile
-FROM golang:1.22-alpine AS builder
-WORKDIR /app
-COPY . .
-RUN go build -o finance-bot main.go
+**Automatic scheduling:**
+- Uses Fly Machines to trigger `/sync` endpoint daily at 8 AM UTC
+- No internal cron job needed
+- Reliable even if app restarts
+- See [FLY_DEPLOYMENT.md](FLY_DEPLOYMENT.md#5-set-up-scheduled-sync-with-fly-machines) for setup details
 
-FROM alpine:latest
-RUN apk --no-cache add ca-certificates
-WORKDIR /root/
-COPY --from=builder /app/finance-bot .
-EXPOSE 8080
-CMD ["./finance-bot"]
-```
 
 ## Configuration
 

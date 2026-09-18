@@ -14,10 +14,9 @@ The entire app is orchestrated by the `App` struct in `main.go`, which composes 
 - **App.llm** (`llm/`) - HTTP client for sending transaction data to Google Gemini for analysis
 - **App.tg** (`telegram/`) - HTTP client for sending formatted reports back to Telegram
 
-The app runs as an HTTP server with three main endpoints:
+The app runs as a stateless HTTP server with two main endpoints:
 - `GET /health` - liveness check for deployment health monitoring
 - `GET /sync` - triggers the synchronization pipeline (fetch → analyze → report)
-- `POST /telegram/webhook` - receives user commands from Telegram and updates database state
 
 ### Key Architectural Constraints
 
@@ -133,11 +132,33 @@ The prompt instructs Gemini to provide brief, actionable advice in English. Tele
 
 `monobank/mcc.go` maps MCC (Merchant Category Code) codes to human-readable categories (Groceries, Restaurants, Transport, etc.). If a code is unknown, `CategoryForMCC` returns "Other".
 
+## Deployment Architecture
+
+The app uses **Fly.io** with **Fly Machines scheduler** for reliable daily synchronization:
+
+1. **Main App Service** - Stateless HTTP server running 24/7, responds to `/sync` requests
+2. **Scheduler Machine** - Separate Fly Machine that runs daily at 8 AM UTC, makes HTTP request to `/sync` endpoint
+3. **Database Volume** - Persistent SQLite storage that survives app restarts
+
+This approach is better than internal cron because:
+- ✅ Scheduler runs independently (not affected by app restarts)
+- ✅ Easy to monitor and debug
+- ✅ Can run multiple sync schedules if needed
+- ✅ Cheap ($0.50/month for scheduler machine)
+
+See [FLY_DEPLOYMENT.md](FLY_DEPLOYMENT.md) for detailed setup instructions.
+
 ## Important Notes
 
-- **Language:** After recent translation, all code comments, error messages, and user-facing strings use English (previously mixed Ukrainian and English).
-- **Future TODOs (from GEMINI.md):**
-  - Finish /sync and /stats Telegram commands (structure exists, implement direct Telegram trigger instead of only HTTP)
-  - Populate and use the monthly_stats table
-  - Add unit tests with mocks
-  - Track budget forecast (e.g., "at current spend rate, deficit by day X")
+- **Language:** All code comments, error messages, and strings use English.
+- **No Internal Cron:** Scheduling happens via Fly Machines, not internal cron job
+- **HTTP-Driven Sync:** Sync is triggered by HTTP requests, making it flexible (manual trigger, scheduled trigger, or external webhooks)
+- **Database:** SQLite with optional persistent volume on Fly.io
+
+## Future TODOs
+
+- [ ] Populate and use the monthly_stats table for historical analysis
+- [ ] Add unit tests with mocks for all packages
+- [ ] Implement budget forecast (e.g., "at current spend rate, deficit by day X")
+- [ ] Add support for multiple Monobank accounts
+- [ ] Web dashboard for viewing reports (instead of Telegram-only)

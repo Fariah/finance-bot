@@ -331,3 +331,31 @@ func (s *Storage) GetLatestTransactionTimestamp() (int64, error) {
 	}
 	return timestamp, nil
 }
+
+// GetTransactionsByDateRange retrieves all transactions within a date range (Unix timestamps)
+func (s *Storage) GetTransactionsByDateRange(from, to int64) ([]Transaction, error) {
+	query := `SELECT id, amount, description, mcc, timestamp, type FROM transactions
+	          WHERE timestamp >= ? AND timestamp <= ?
+	          ORDER BY timestamp DESC;`
+
+	rows, err := s.db.Query(query, from, to)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var txs []Transaction
+	for rows.Next() {
+		var tx Transaction
+		if err := rows.Scan(&tx.ID, &tx.Amount, &tx.Description, &tx.MCC, &tx.Timestamp, &tx.Type); err != nil {
+			return nil, err
+		}
+		txs = append(txs, tx)
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return txs, nil
+}

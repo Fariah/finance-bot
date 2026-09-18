@@ -9,35 +9,36 @@ import (
 	"time"
 )
 
-const geminiAPIURL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=%s"
+const claudeAPIURL = "https://api.anthropic.com/v1/messages"
+const claudeModel = "claude-haiku-4-5-20251001"
 
-// Client for working with Gemini API
+// Client for working with Claude API (Anthropic)
 type Client struct {
 	apiKey     string
 	httpClient *http.Client
 }
 
-// Request/Response structures for Gemini
-type geminiRequest struct {
-	Contents []content `json:"contents"`
+// Request/Response structures for Claude API
+type claudeRequest struct {
+	Model     string       `json:"model"`
+	MaxTokens int          `json:"max_tokens"`
+	Messages  []claudeMsg  `json:"messages"`
 }
 
-type content struct {
-	Parts []part `json:"parts"`
+type claudeMsg struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
 }
 
-type part struct {
-	Text string `json:"text"`
-}
-
-type geminiResponse struct {
-	Candidates []struct {
-		Content struct {
-			Parts []struct {
-				Text string `json:"text"`
-			} `json:"parts"`
-		} `json:"content"`
-	} `json:"candidates"`
+type claudeResponse struct {
+	Content []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	} `json:"content"`
+	Error *struct {
+		Type    string `json:"type"`
+		Message string `json:"message"`
+	} `json:"error"`
 }
 
 func NewClient(apiKey string) *Client {
@@ -51,11 +52,14 @@ func NewClient(apiKey string) *Client {
 
 // Analyze sends a prompt with numbers to AI and gets advice text back
 func (c *Client) Analyze(prompt string) (string, error) {
-	url := fmt.Sprintf(geminiAPIURL, c.apiKey)
-
-	reqBody := geminiRequest{
-		Contents: []content{
-			{Parts: []part{{Text: prompt}}},
+	reqBody := claudeRequest{
+		Model:     claudeModel,
+		MaxTokens: 1024,
+		Messages: []claudeMsg{
+			{
+				Role:    "user",
+				Content: prompt,
+			},
 		},
 	}
 
@@ -64,11 +68,13 @@ func (c *Client) Analyze(prompt string) (string, error) {
 		return "", err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewBuffer(jsonData))
+	req, err := http.NewRequest(http.MethodPost, claudeAPIURL, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", c.apiKey)
+	req.Header.Set("anthropic-version", "2023-06-01")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -76,18 +82,22 @@ func (c *Client) Analyze(prompt string) (string, error) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("Gemini API error (%d): %s", resp.StatusCode, string(bodyBytes))
-	}
-
-	var geminiResp geminiResponse
-	if err := json.NewDecoder(resp.Body).Decode(&geminiResp); err != nil {
+	var claudeResp claudeResponse
+	if err := json.NewDecoder(resp.Body).Decode(&claudeResp); err != nil {
 		return "", err
 	}
 
-	if len(geminiResp.Candidates) > 0 && len(geminiResp.Candidates[0].Content.Parts) > 0 {
-		return geminiResp.Candidates[0].Content.Parts[0].Text, nil
+	if claudeResp.Error != nil {
+		return "", fmt.Errorf("Claude API error: %s", claudeResp.Error.Message)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("Claude API error (%d): %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	if len(claudeResp.Content) > 0 && claudeResp.Content[0].Type == "text" {
+		return claudeResp.Content[0].Text, nil
 	}
 
 	return "", fmt.Errorf("empty response from LLM")

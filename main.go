@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
 	"math"
@@ -29,7 +28,7 @@ type App struct {
 }
 
 // NewApp initializes and returns a new App instance
-func NewApp(dbPath, monoToken, monoAccount, tgToken, tgChatID, geminiKey string) (*App, error) {
+func NewApp(dbPath, monoToken, monoAccount, tgToken, tgChatID, anthropicKey string) (*App, error) {
 	store, err := storage.NewStorage(dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("storage initialization error: %w", err)
@@ -39,12 +38,12 @@ func NewApp(dbPath, monoToken, monoAccount, tgToken, tgChatID, geminiKey string)
 		storage:     store,
 		mono:        monobank.NewClient(monoToken),
 		tg:          telegram.NewClient(tgToken, tgChatID),
-		llm:         llm.NewClient(geminiKey),
+		llm:         llm.NewClient(anthropicKey),
 		monoAccount: monoAccount,
 	}, nil
 }
 
-// Sync loads transactions, saves them and sends a report
+// Sync fetches new transactions from Monobank and saves to DB, then analyzes current month data
 func (app *App) Sync(days int) error {
 	log.Println("Starting transaction synchronization...")
 
@@ -59,10 +58,8 @@ func (app *App) Sync(days int) error {
 
 	var from int64
 	if latestTime > 0 {
-		// Start from the next second after the last transaction
 		from = latestTime + 1
 	} else {
-		// If the database is empty, load data for the last N days
 		from = now.AddDate(0, 0, -days).Unix()
 	}
 
@@ -72,63 +69,71 @@ func (app *App) Sync(days int) error {
 		from = thirtyOneDaysAgo
 	}
 
-	// If the time difference is too small, skip
-	if to-from < 10 {
-		log.Println("No new periods to synchronize (too little time since last request).")
-		return nil
+	// If the time difference is too small, skip fetch but still analyze
+	if to-from >= 10 {
+		log.Printf("Requesting transactions from Monobank for period from %s to %s",
+			time.Unix(from, 0).Format("2006-01-02 15:04:05"),
+			time.Unix(to, 0).Format("2006-01-02 15:04:05"),
+		)
+
+		items, err := app.mono.GetStatement(app.monoAccount, from, to)
+		if err != nil {
+			return fmt.Errorf("error getting statement from Monobank: %w", err)
+		}
+
+		if len(items) > 0 {
+			log.Printf("Received %d new transactions. Saving to database...", len(items))
+			for _, item := range items {
+				txType := "expense"
+				if item.Amount > 0 {
+					txType = "income"
+				}
+
+				tx := storage.Transaction{
+					ID:          item.ID,
+					Amount:      item.Amount,
+					Description: item.Description,
+					MCC:         item.MCC,
+					Timestamp:   item.Time,
+					Type:        txType,
+				}
+
+				if err := app.storage.SaveTransaction(tx); err != nil {
+					log.Printf("Error saving transaction %s to database: %v", tx.ID, err)
+				}
+			}
+		} else {
+			log.Println("No new transactions from Monobank.")
+		}
+	} else {
+		log.Println("Not enough time has passed since last sync. Skipping Monobank fetch.")
 	}
 
-	log.Printf("Requesting transactions from Monobank for period from %s to %s",
-		time.Unix(from, 0).Format("2006-01-02 15:04:05"),
-		time.Unix(to, 0).Format("2006-01-02 15:04:05"),
-	)
+	// === ANALYSIS PHASE: Always analyze current month data from database ===
+	log.Println("Starting analysis phase...")
 
-	items, err := app.mono.GetStatement(app.monoAccount, from, to)
+	// Get current month boundaries (1st to last day)
+	firstDay := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+	lastDay := firstDay.AddDate(0, 1, -1)
+	lastDayEnd := time.Date(lastDay.Year(), lastDay.Month(), lastDay.Day(), 23, 59, 59, 999999999, now.Location())
+
+	log.Printf("Fetching transactions for financial month: %s to %s",
+		firstDay.Format("2006-01-02"), lastDayEnd.Format("2006-01-02"))
+
+	monthTxs, err := app.storage.GetTransactionsByDateRange(firstDay.Unix(), lastDayEnd.Unix())
 	if err != nil {
-		return fmt.Errorf("error getting statement from Monobank: %w", err)
+		return fmt.Errorf("error fetching month transactions: %w", err)
 	}
+	log.Printf("Found %d transactions in current month", len(monthTxs))
 
-	if len(items) == 0 {
-		log.Println("No new transactions in the specified period.")
-		return nil
-	}
-
-	log.Printf("Received %d new transactions. Saving to database...", len(items))
-
-	var txsToAnalyze []storage.Transaction
-	for _, item := range items {
-		txType := "expense"
-		if item.Amount > 0 {
-			txType = "income"
-		}
-
-		tx := storage.Transaction{
-			ID:          item.ID,
-			Amount:      item.Amount,
-			Description: item.Description,
-			MCC:         item.MCC,
-			Timestamp:   item.Time,
-			Type:        txType,
-		}
-
-		if err := app.storage.SaveTransaction(tx); err != nil {
-			log.Printf("Error saving transaction %s to database: %v", tx.ID, err)
-			continue
-		}
-		txsToAnalyze = append(txsToAnalyze, tx)
-	}
-
-	if len(txsToAnalyze) == 0 {
-		log.Println("No new transactions were saved (maybe they all already exist).")
-		return nil
-	}
-
-	log.Println("Calculating budget status for prompt...")
+	// Calculate budget status
+	log.Println("Calculating budget status...")
 	budgetStatus, err := app.CalculateBudgetStatus(now)
 	if err != nil {
 		log.Printf("Warning: failed to calculate budget: %v", err)
 	}
 
+	// Get obligations and planned expenses
 	obligationsDue, err := app.storage.ObligationsDueThisMonth(now)
 	if err != nil {
 		log.Printf("Warning: failed to get obligations: %v", err)
@@ -139,10 +144,16 @@ func (app *App) Sync(days int) error {
 		log.Printf("Warning: failed to get planned expenses: %v", err)
 	}
 
-	log.Println("Building analysis prompt for Gemini...")
-	prompt := app.buildAnalysisPrompt(txsToAnalyze, budgetStatus, obligationsDue, pendingPlanned)
+	// Skip analysis only if no data at all: no transactions, no income, no obligations
+	if len(monthTxs) == 0 && !budgetStatus.HasIncome && len(obligationsDue) == 0 && len(pendingPlanned) == 0 {
+		log.Println("No data to analyze (empty month, no income, no obligations). Skipping analysis.")
+		return nil
+	}
 
-	log.Println("Requesting analysis from Gemini AI...")
+	log.Println("Building analysis prompt for Claude...")
+	prompt := app.buildAnalysisPrompt(monthTxs, budgetStatus, obligationsDue, pendingPlanned)
+
+	log.Println("Requesting analysis from Claude AI...")
 	report, err := app.llm.Analyze(prompt)
 	if err != nil {
 		return fmt.Errorf("error generating analytics: %w", err)
@@ -159,20 +170,23 @@ func (app *App) Sync(days int) error {
 		}
 	}
 
-	log.Println("Synchronization completed successfully!")
+	log.Println("Synchronization and analysis completed successfully!")
 	return nil
 }
 
 // BudgetStatus describes the calculated budget status for the current month
 type BudgetStatus struct {
-	HasIncome            bool
-	MonthlyIncomeCents   int64
-	ObligationsCents     int64
-	ApprovedPlannedCents int64
-	SpentCents           int64
-	RemainingCents       int64
-	DaysLeftInMonth      int
-	SuggestedDailyLimit  int64
+	HasIncome              bool
+	MonthlyIncomeCents     int64
+	ObligationsCents       int64
+	ApprovedPlannedCents   int64
+	SpentCents             int64
+	RemainingCents         int64
+	DaysLeftInMonth        int
+	SuggestedDailyLimit    int64
+	MandatorySavingsCents  int64 // ОВДП + батьки = 800000 копійок (8000 UAH)
+	MonthlyBalanceCents    int64 // дохід - видатки - обов'язкові - відрахування
+	ProjectedYearlyBalance int64 // місячний баланс * 12
 }
 
 // CalculateBudgetStatus calculates how much money remains for the month considering
@@ -218,7 +232,15 @@ func (app *App) CalculateBudgetStatus(now time.Time) (BudgetStatus, error) {
 	}
 	status.ApprovedPlannedCents = approvedPlanned
 
+	status.MandatorySavingsCents = 800000 // 8000 UAH: ОВДП (4000) + батьки (4000)
+
 	status.RemainingCents = status.MonthlyIncomeCents - status.ObligationsCents - status.SpentCents - status.ApprovedPlannedCents
+
+	// Місячний баланс після обов'язкових видатків та відрахувань
+	status.MonthlyBalanceCents = status.MonthlyIncomeCents - status.ObligationsCents - status.SpentCents - status.MandatorySavingsCents
+
+	// Річний прогноз на основі поточного місячного балансу
+	status.ProjectedYearlyBalance = status.MonthlyBalanceCents * 12
 
 	totalDaysInMonth := int(monthEnd.Sub(monthStart).Hours() / 24)
 	daysLeft := totalDaysInMonth - now.Day() + 1
@@ -260,49 +282,119 @@ func (app *App) formatBudgetStatus(s BudgetStatus) string {
 	return sb.String()
 }
 
+// CategorySpending aggregates spending by MCC category
+type CategorySpending struct {
+	Category string
+	Amount   int64 // in kopiykas
+	Count    int
+}
+
+// aggregateByCategory groups transactions by MCC category
+func aggregateByCategory(txs []storage.Transaction) []CategorySpending {
+	categoryMap := make(map[string]int64)
+	countMap := make(map[string]int)
+
+	for _, tx := range txs {
+		if tx.Type == "expense" {
+			cat := monobank.CategoryForMCC(tx.MCC)
+			categoryMap[cat] -= tx.Amount // expenses are negative
+			countMap[cat]++
+		}
+	}
+
+	var result []CategorySpending
+	for cat, amount := range categoryMap {
+		result = append(result, CategorySpending{
+			Category: cat,
+			Amount:   amount,
+			Count:    countMap[cat],
+		})
+	}
+
+	// Sort by amount descending
+	for i := 0; i < len(result)-1; i++ {
+		for j := i + 1; j < len(result); j++ {
+			if result[j].Amount > result[i].Amount {
+				result[i], result[j] = result[j], result[i]
+			}
+		}
+	}
+
+	return result
+}
+
 // buildAnalysisPrompt builds a structured request to the AI.
 // In addition to transactions, it includes the current budget status, mandatory payments and
 // planned one-time expenses so that the AI advice takes into account the full picture, not just a list of purchases.
 func (app *App) buildAnalysisPrompt(txs []storage.Transaction, status BudgetStatus, obligations []storage.Obligation, pendingPlanned []storage.PlannedExpense) string {
 	var sb strings.Builder
-	sb.WriteString("You are a personal financial advisor. Analyze the new transactions in the context of the user's monthly budget and provide brief, specific and actionable advice in English: is the user staying within budget, is there a risk of going negative, and what can they afford in the near term. Format your response in Markdown for Telegram (bold text, lists), avoid complex formatting and unnecessary verbosity.\n\n")
+	sb.WriteString("Ти персональний фінансовий консультант для сім'ї (2 дорослих + дитина + тварини).\n")
+	sb.WriteString("Твоя мета: 1) Оцінити чи користувач вкладається в річний бюджет (має бути ПЛЮС або 0, не мінус). 2) Проаналізувати видатки по категоріям. 3) Знайти де користувач витрачає БАГАТО і дати конкретні рекомендації.\n")
+	sb.WriteString("Дохід: $3500/мес. Обов'язкові щомісячні: ОВДП 4000 + батьки 4000 = 8000 UAH.\n")
+	sb.WriteString("Якщо видатки зростають по категоріям - це RED FLAG, треба скорочувати.\n")
+	sb.WriteString("Будь КРИТИЧНИМ і КОНКРЕТНИМ. Форматуй Markdown для Telegram, без зайвої багатослівності.\n\n")
 
 	if status.HasIncome {
-		sb.WriteString("### Budget for this month\n")
-		sb.WriteString(fmt.Sprintf("- Income: %.2f UAH\n", float64(status.MonthlyIncomeCents)/100))
-		sb.WriteString(fmt.Sprintf("- Mandatory payments this month: %.2f UAH\n", float64(status.ObligationsCents)/100))
+		sb.WriteString("### Аналіз бюджету\n")
+		sb.WriteString(fmt.Sprintf("- **Дохід на місяць:** %.2f UAH\n", float64(status.MonthlyIncomeCents)/100))
+		sb.WriteString(fmt.Sprintf("- **Видатки цього місяця:** %.2f UAH\n", float64(status.SpentCents)/100))
+		sb.WriteString(fmt.Sprintf("- **Обов'язкові платежі:** %.2f UAH\n", float64(status.ObligationsCents)/100))
+		sb.WriteString(fmt.Sprintf("- **Обов'язкові відрахування (ОВДП + батьки):** %.2f UAH\n", float64(status.MandatorySavingsCents)/100))
 		if status.ApprovedPlannedCents > 0 {
-			sb.WriteString(fmt.Sprintf("- Approved planned expenses: %.2f UAH\n", float64(status.ApprovedPlannedCents)/100))
-		}
-		sb.WriteString(fmt.Sprintf("- Spent this month: %.2f UAH\n", float64(status.SpentCents)/100))
-		sb.WriteString(fmt.Sprintf("- Days left in month: %d\n", status.DaysLeftInMonth))
-		if status.RemainingCents > 0 {
-			sb.WriteString(fmt.Sprintf("- Free balance: %.2f UAH (~%.2f UAH/day)\n", float64(status.RemainingCents)/100, float64(status.SuggestedDailyLimit)/100))
-		} else {
-			sb.WriteString(fmt.Sprintf("- WARNING: predicted deficit by end of month: %.2f UAH\n", -float64(status.RemainingCents)/100))
+			sb.WriteString(fmt.Sprintf("- **Затверджені планові видатки:** %.2f UAH\n", float64(status.ApprovedPlannedCents)/100))
 		}
 		sb.WriteString("\n")
+
+		sb.WriteString("### Місячний баланс\n")
+		sb.WriteString(fmt.Sprintf("- **Залишок після всього:** %.2f UAH\n", float64(status.MonthlyBalanceCents)/100))
+		if status.MonthlyBalanceCents > 0 {
+			sb.WriteString(fmt.Sprintf("- ✅ **Річний прогноз:** +%.2f UAH (плюс, якщо видатки такі ж кожен місяць)\n", float64(status.ProjectedYearlyBalance)/100))
+		} else {
+			sb.WriteString(fmt.Sprintf("- ⚠️ **УВАГА: Річний прогноз:** %.2f UAH (МІНУС! Треба скорочувати видатки!)\n", float64(status.ProjectedYearlyBalance)/100))
+		}
+		sb.WriteString("\n")
+
+		// Analyze spending by category
+		categories := aggregateByCategory(txs)
+		if len(categories) > 0 {
+			sb.WriteString("### Аналіз видатків по категоріям\n")
+			totalSpent := int64(0)
+			for _, c := range categories {
+				totalSpent += c.Amount
+			}
+			for i, c := range categories {
+				if i >= 5 { // Show top 5 categories
+					break
+				}
+				percentage := 0.0
+				if totalSpent > 0 {
+					percentage = float64(c.Amount) / float64(totalSpent) * 100
+				}
+				sb.WriteString(fmt.Sprintf("- **%s:** %.2f UAH (%.0f%%, %d операцій)\n", c.Category, float64(c.Amount)/100, percentage, c.Count))
+			}
+			sb.WriteString("\n")
+		}
 	} else {
-		sb.WriteString("### Budget\nMonthly income is not set, so evaluate the situation based on spending trends alone.\n\n")
+		sb.WriteString("### Бюджет\nМісячний дохід не встановлено, тому оцінюю ситуацію на основі видатків.\n\n")
 	}
 
 	if len(obligations) > 0 {
-		sb.WriteString("### Mandatory payments this month\n")
+		sb.WriteString("### Обов'язкові платежі цього місяця\n")
 		for _, o := range obligations {
-			sb.WriteString(fmt.Sprintf("- %s: %.2f UAH (date: %s)\n", o.Name, float64(o.Amount)/100, o.NextDueDate))
+			sb.WriteString(fmt.Sprintf("- %s: %.2f UAH (дата: %s)\n", o.Name, float64(o.Amount)/100, o.NextDueDate))
 		}
 		sb.WriteString("\n")
 	}
 
 	if len(pendingPlanned) > 0 {
-		sb.WriteString("### Planned one-time expenses awaiting user decision\n")
+		sb.WriteString("### Планові одноразові видатки, що чекають підтвердження\n")
 		for _, p := range pendingPlanned {
 			sb.WriteString(fmt.Sprintf("- %s: %.2f UAH\n", p.Name, float64(p.Amount)/100))
 		}
 		sb.WriteString("\n")
 	}
 
-	sb.WriteString("### New transactions\n")
+	sb.WriteString("### Операції\n")
 	for _, tx := range txs {
 		amountFormatted := float64(tx.Amount) / 100.0
 		sign := "-"
@@ -318,43 +410,6 @@ func (app *App) buildAnalysisPrompt(txs []storage.Transaction, status BudgetStat
 	return sb.String()
 }
 
-// telegramUpdate describes the structure of an incoming request from Telegram Webhook
-type telegramUpdate struct {
-	UpdateID int `json:"update_id"`
-	Message  *struct {
-		MessageID int    `json:"message_id"`
-		Text      string `json:"text,omitempty"`
-		Chat      struct {
-			ID int64 `json:"id"`
-		} `json:"chat"`
-	} `json:"message,omitempty"`
-}
-
-// handleTelegramWebhook handles incoming updates from Telegram bot (webhooks)
-func (app *App) handleTelegramWebhook(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var update telegramUpdate
-	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
-		log.Printf("Error decoding Telegram update: %v", err)
-		http.Error(w, "Bad request", http.StatusBadRequest)
-		return
-	}
-
-	if update.Message != nil && update.Message.Text != "" {
-		log.Printf("Received message from chat %d: %s", update.Message.Chat.ID, update.Message.Text)
-
-		if err := app.processCommand(update.Message.Chat.ID, update.Message.Text); err != nil {
-			log.Printf("Error processing command: %v", err)
-		}
-	}
-
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("OK"))
-}
 
 // settingMonthlyIncome is the key in the settings table for expected monthly income (in kopiykas)
 const settingMonthlyIncome = "monthly_income"
@@ -605,7 +660,7 @@ func main() {
 	monoAccount := os.Getenv("MONOBANK_ACCOUNT_ID")
 	tgToken := os.Getenv("TELEGRAM_BOT_TOKEN")
 	tgChatID := os.Getenv("TELEGRAM_CHAT_ID")
-	geminiKey := os.Getenv("GEMINI_API_KEY")
+	anthropicKey := os.Getenv("ANTHROPIC_API_KEY")
 
 	// Check for required environment variables
 	var missing []string
@@ -621,15 +676,15 @@ func main() {
 	if tgChatID == "" {
 		missing = append(missing, "TELEGRAM_CHAT_ID")
 	}
-	if geminiKey == "" {
-		missing = append(missing, "GEMINI_API_KEY")
+	if anthropicKey == "" {
+		missing = append(missing, "ANTHROPIC_API_KEY")
 	}
 
 	var app *App
 	var initErr error
 
 	if len(missing) == 0 {
-		app, initErr = NewApp(dbPath, monoToken, monoAccount, tgToken, tgChatID, geminiKey)
+		app, initErr = NewApp(dbPath, monoToken, monoAccount, tgToken, tgChatID, anthropicKey)
 		if initErr != nil {
 			log.Fatalf("Error initializing app: %v", initErr)
 		}
@@ -639,13 +694,13 @@ func main() {
 		log.Println("Please fill them in for full functionality.")
 	}
 
-	// Healthcheck for Fly.io (always works so Fly.io doesn't restart container due to failed deploy)
+	// Health check endpoint for deployment monitoring
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
 	})
 
-	// Endpoint for manual synchronization trigger
+	// Manual synchronization endpoint (triggered by Fly Machines scheduler or manual HTTP calls)
 	http.HandleFunc("/sync", func(w http.ResponseWriter, r *http.Request) {
 		if app == nil {
 			http.Error(w, "Error: Bot not initialized. Check configuration.", http.StatusServiceUnavailable)
@@ -662,6 +717,7 @@ func main() {
 			days = parsedDays
 		}
 
+		log.Println("Sync triggered via HTTP")
 		err := app.Sync(days)
 		if err != nil {
 			log.Printf("Error during synchronization: %v", err)
@@ -673,16 +729,9 @@ func main() {
 		w.Write([]byte("Synchronization successful! Report sent to Telegram."))
 	})
 
-	// Endpoint for Telegram webhooks (for receiving commands)
-	http.HandleFunc("/telegram/webhook", func(w http.ResponseWriter, r *http.Request) {
-		if app == nil {
-			http.Error(w, "Error: Bot not initialized.", http.StatusServiceUnavailable)
-			return
-		}
-		app.handleTelegramWebhook(w, r)
-	})
-
 	log.Printf("Financial advisor server started on port %s\n", port)
+	log.Println("Sync endpoint available at: GET /sync?days=7")
+	log.Println("Health check available at: GET /health")
 
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
 		log.Fatalf("Error starting server: %v", err)

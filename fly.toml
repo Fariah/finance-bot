@@ -1,0 +1,69 @@
+# Fly.io configuration for Finance Bot
+# Deploy with: flyctl deploy
+
+app = "finance-bot"
+primary_region = "ams"  # Amsterdam - adjust to your preferred region
+
+# Web service configuration
+[build]
+  builder = "paketobuildpacks"
+
+[env]
+  LOG_LEVEL = "info"
+
+[[services]]
+  protocol = "tcp"
+  internal_port = 8080
+
+  [services.concurrency]
+    type = "connections"
+    hard_limit = 25
+    soft_limit = 20
+
+  [[services.ports]]
+    port = 80
+    handlers = ["http"]
+    force_https = true
+
+  [[services.ports]]
+    port = 443
+    handlers = ["http"]
+    force_https = true
+
+  [[services.tcp_checks]]
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "5s"
+
+# Secrets should be set via: flyctl secrets set VAR_NAME=value
+# Required secrets:
+# - MONOBANK_TOKEN
+# - MONOBANK_ACCOUNT_ID
+# - TELEGRAM_BOT_TOKEN
+# - TELEGRAM_CHAT_ID
+# - GEMINI_API_KEY
+
+# Optional: Add persistent volume for SQLite database
+# Create with: flyctl volumes create finance_db --region ams --size 1
+# [[mounts]]
+#   source = "finance_db"
+#   destination = "/data"
+#   processes = ["app"]
+
+[processes]
+  app = "finance-bot"
+
+# Health check configuration
+[checks.http]
+  grace_period = "30s"
+  interval = 10000
+  method = "GET"
+  path = "/health"
+  protocol = "http"
+  timeout = 5000
+  tls_server_name = ""
+
+[checks.tcp]
+  grace_period = "1s"
+  interval = 15000
+  timeout = 5000
