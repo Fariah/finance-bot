@@ -1,4 +1,4 @@
-# Finance Bot (Фінансовий Радник)
+# Finance Bot (Financial Advisor)
 
 This repository contains a Go-based personal finance advisor bot that synchronizes transactions from Monobank, stores them in an SQLite database, analyzes them using Google's Gemini LLM, and delivers structured financial reports and budget advice via Telegram.
 
@@ -80,7 +80,7 @@ The server will start on the configured port (default `8080`).
 ## 🎨 Development Conventions
 
 ### General Conventions
-- **Code Language:** The code uses English for variable names and package structures, but code comments, logs, and user-facing messages (Telegram / Gemini prompt instructions) are in **Ukrainian**. Maintain this standard.
+- **Code Language:** The code uses English for variable names, package structures, comments, logs, and user-facing messages. Maintain this standard.
 - **Error Handling:** Always wrap errors using `%w` to preserve context, e.g., `fmt.Errorf("failed to do X: %w", err)`.
 - **Database Rules:** 
   - Monetary values are stored as **integers representing cents/kopiykas** (e.g., 100 UAH is represented as `10000`).

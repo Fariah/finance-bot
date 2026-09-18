@@ -11,13 +11,13 @@ import (
 
 const geminiAPIURL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=%s"
 
-// Client для роботи з Gemini API
+// Client for working with Gemini API
 type Client struct {
 	apiKey     string
 	httpClient *http.Client
 }
 
-// Request/Response структури для Gemini
+// Request/Response structures for Gemini
 type geminiRequest struct {
 	Contents []content `json:"contents"`
 }
@@ -49,7 +49,7 @@ func NewClient(apiKey string) *Client {
 	}
 }
 
-// Analyze відправляє промпт з цифрами до ШІ і отримує текст поради
+// Analyze sends a prompt with numbers to AI and gets advice text back
 func (c *Client) Analyze(prompt string) (string, error) {
 	url := fmt.Sprintf(geminiAPIURL, c.apiKey)
 
@@ -78,7 +78,7 @@ func (c *Client) Analyze(prompt string) (string, error) {
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("помилка Gemini API (%d): %s", resp.StatusCode, string(bodyBytes))
+		return "", fmt.Errorf("Gemini API error (%d): %s", resp.StatusCode, string(bodyBytes))
 	}
 
 	var geminiResp geminiResponse
@@ -90,5 +90,5 @@ func (c *Client) Analyze(prompt string) (string, error) {
 		return geminiResp.Candidates[0].Content.Parts[0].Text, nil
 	}
 
-	return "", fmt.Errorf("порожня відповідь від LLM")
+	return "", fmt.Errorf("empty response from LLM")
 }

@@ -1,96 +1,96 @@
 package monobank
 
-// mccCategories мапить коди MCC (Merchant Category Code) на зрозумілі категорії українською.
-// Список охоплює найпоширеніші категорії витрат, з якими стикається типовий користувач в Україні.
+// mccCategories maps MCC (Merchant Category Code) codes to human-readable categories.
+// The list covers the most common expense categories that a typical user encounters.
 var mccCategories = map[int]string{
-	// Продукти харчування
-	5411: "Продукти (супермаркети)",
-	5412: "Продукти (магазини)",
-	5422: "М'ясо",
-	5441: "Кондитерські",
-	5451: "Молочні продукти",
-	5462: "Випічка",
-	5499: "Продукти (інше)",
+	// Groceries
+	5411: "Groceries (supermarkets)",
+	5412: "Groceries (stores)",
+	5422: "Meat",
+	5441: "Bakeries",
+	5451: "Dairy products",
+	5462: "Bakery",
+	5499: "Groceries (other)",
 
-	// Кафе, ресторани, доставка їжі
-	5811: "Громадське харчування",
-	5812: "Ресторани",
-	5813: "Бари",
-	5814: "Фастфуд",
+	// Cafes, restaurants, food delivery
+	5811: "Food services",
+	5812: "Restaurants",
+	5813: "Bars",
+	5814: "Fast food",
 
-	// Транспорт
-	4111: "Громадський транспорт",
-	4121: "Таксі",
-	4131: "Автобусні перевезення",
-	4511: "Авіаквитки",
-	5541: "АЗС (паливо)",
-	5542: "АЗС (автоматичні)",
-	7523: "Паркування",
+	// Transport
+	4111: "Public transport",
+	4121: "Taxi",
+	4131: "Bus transportation",
+	4511: "Airlines",
+	5541: "Gas station (fuel)",
+	5542: "Gas station (self-service)",
+	7523: "Parking",
 
-	// Здоров'я
-	5912: "Аптеки",
-	8011: "Лікарі",
-	8021: "Стоматологія",
-	8062: "Лікарні",
+	// Health
+	5912: "Pharmacies",
+	8011: "Doctors",
+	8021: "Dentistry",
+	8062: "Hospitals",
 
-	// Одяг та побут
-	5611: "Чоловічий одяг",
-	5621: "Жіночий одяг",
-	5631: "Аксесуари",
-	5641: "Дитячий одяг",
-	5651: "Одяг (сімейний)",
-	5661: "Взуття",
-	5691: "Одяг (магазини)",
-	5732: "Електроніка",
-	5734: "Комп'ютерні магазини",
-	5722: "Побутова техніка",
-	5200: "Будівельні магазини",
-	5300: "Гуртові магазини",
+	// Clothing and household
+	5611: "Men's clothing",
+	5621: "Women's clothing",
+	5631: "Accessories",
+	5641: "Children's clothing",
+	5651: "Family clothing",
+	5661: "Shoes",
+	5691: "Clothing (stores)",
+	5732: "Electronics",
+	5734: "Computer stores",
+	5722: "Appliances",
+	5200: "Hardware stores",
+	5300: "Wholesale stores",
 
-	// Розваги та підписки
-	5815: "Стрімінг/цифровий контент",
-	5816: "Цифрові ігри",
-	5817: "Ігрові підписки",
-	5818: "Цифрові товари (інше)",
-	7832: "Кінотеатри",
-	7922: "Театри/концерти",
-	7995: "Азартні ігри",
-	5992: "Квіти",
+	// Entertainment and subscriptions
+	5815: "Streaming/digital content",
+	5816: "Digital games",
+	5817: "Gaming subscriptions",
+	5818: "Digital goods (other)",
+	7832: "Movie theaters",
+	7922: "Theaters/concerts",
+	7995: "Gambling",
+	5992: "Flowers",
 
-	// Зв'язок та комунальні
-	4812: "Мобільний зв'язок",
-	4814: "Телекомунікації",
-	4816: "Комп'ютерні мережі/інтернет",
-	4899: "Кабельне/супутникове ТБ",
-	4900: "Комунальні послуги",
+	// Communication and utilities
+	4812: "Mobile communication",
+	4814: "Telecommunications",
+	4816: "Computer networks/internet",
+	4899: "Cable/satellite TV",
+	4900: "Utilities",
 
-	// Фінансові операції
-	6011: "Зняття готівки (банкомат)",
-	6012: "Фінансові послуги",
-	6051: "Перекази/крипта",
-	6538: "Поповнення рахунку",
-	6540: "Поповнення карти",
+	// Financial transactions
+	6011: "Cash withdrawal (ATM)",
+	6012: "Financial services",
+	6051: "Transfers/crypto",
+	6538: "Account top-up",
+	6540: "Card top-up",
 
-	// Краса та особисті послуги
-	7230: "Перукарні/салони краси",
-	7298: "СПА",
+	// Beauty and personal services
+	7230: "Hair salons/beauty salons",
+	7298: "Spa",
 
-	// Освіта
-	8211: "Школи",
-	8220: "Виші",
-	8241: "Онлайн-освіта",
-	8299: "Освіта (інше)",
+	// Education
+	8211: "Schools",
+	8220: "Universities",
+	8241: "Online education",
+	8299: "Education (other)",
 
-	// Подорожі
-	7011: "Готелі",
-	4722: "Тур-агентства",
+	// Travel
+	7011: "Hotels",
+	4722: "Travel agencies",
 }
 
-// CategoryForMCC повертає людяночитабельну назву категорії за MCC-кодом.
-// Якщо код невідомий, повертає "Інше" разом з самим кодом для довідки.
+// CategoryForMCC returns a human-readable category name by MCC code.
+// If the code is unknown, returns "Other".
 func CategoryForMCC(mcc int) string {
 	if category, ok := mccCategories[mcc]; ok {
 		return category
 	}
-	return "Інше"
+	return "Other"
 }
