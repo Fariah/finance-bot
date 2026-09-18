@@ -1,100 +1,88 @@
 # Finance Bot - Personal Financial Advisor 💰
 
-A Go-based financial advisor that analyzes your bank transactions, tracks your budget, and provides AI-powered financial advice in **Ukrainian**. It syncs transactions from Monobank, stores them in SQLite, and uses Claude AI to deliver actionable insights via Telegram.
+A Go-based financial advisor that analyzes your Monobank transactions, tracks your budget, and provides AI-powered financial advice. It syncs bank data, stores it locally in SQLite, and uses Claude AI to deliver actionable insights via Telegram.
 
 ## Features
 
 - ✅ **One-Click Analysis** - Run `finance-bot.exe` and get instant financial report
-- 📊 **Smart Budget Tracking** - Annual budget outlook, monthly balance, recurring payments, planned expenses
-- 🤖 **AI-Powered Analysis** - Claude AI analyzes spending trends, categories, and identifies overspending areas
-- 💬 **Telegram Reports** - Receive formatted analysis in Ukrainian directly to Telegram
-- 📈 **Category Breakdown** - Automatic spending analysis by category (Food, Transport, Entertainment, etc.)
-- 💡 **Trend Detection** - Identifies when spending patterns are unsustainable for annual budget goals
-- 🏦 **Flexible Deployment** - Works locally, on Fly.io, or anywhere with Go runtime
+- 💰 **Annual Budget Tracking** - Calculates yearly balance projections based on current spending patterns
+- 🤖 **AI-Powered Analysis** - Claude AI identifies spending trends by category and flags excessive expenses
+- 💬 **Telegram Reports** - Formatted financial analysis delivered directly to Telegram
+- 📊 **Category Breakdown** - Automatic spending categorization (Food, Transport, Entertainment, subscriptions, etc.)
+- 🎯 **Monthly Balance** - Income minus expenses minus mandatory savings with annual forecast
+- 💾 **Local SQLite Database** - All data stored locally, no cloud required
 
 ## Quick Start
 
 ### Prerequisites
 
-- Go 1.20+ (or use pre-built `finance-bot.exe`)
-- Monobank account with personal API access token
-- Telegram Bot (create via @BotFather)
-- Anthropic Claude API key (https://console.anthropic.com/)
+- Go 1.20+ (for building) or pre-built `finance-bot.exe`
+- Monobank account with personal API token from https://api.monobank.ua/
+- Telegram bot token from @BotFather
+- Claude API key from https://console.anthropic.com/
 
-### Installation & First Run
+### Setup & Run
 
-1. **Clone the repository**
+1. **Clone repository**
    ```bash
-   git clone <repository-url>
+   git clone <repo-url>
    cd finance-bot
    ```
 
-2. **Set up environment**
+2. **Create `.env` file**
    ```bash
    cp .env.example .env
-   # Edit .env with your credentials
    ```
 
-3. **Fill in `.env` with your API keys**
+3. **Edit `.env` with your API keys:**
    ```env
    MONOBANK_TOKEN=your_monobank_token
    MONOBANK_ACCOUNT_ID=your_account_id
-   TELEGRAM_BOT_TOKEN=your_bot_token
+   TELEGRAM_BOT_TOKEN=your_telegram_bot_token
    TELEGRAM_CHAT_ID=your_chat_id
    ANTHROPIC_API_KEY=your_claude_api_key
+   MONTHLY_INCOME=15500000          # Your monthly income in kopiykas
+   MANDATORY_SAVINGS=800000         # Monthly savings target in kopiykas
    ```
 
-4. **Build the application** (one time)
+4. **Build** (one-time)
    ```bash
    go build -o finance-bot.exe main.go
    ```
 
-5. **Run analysis** - Just double-click or run:
+5. **Run analysis**
    ```bash
    .\finance-bot.exe
    ```
-   
-   That's it! The app will:
-   - 📥 Fetch last 31 days from Monobank
-   - 💾 Save/update transactions in local database
-   - 🤖 Analyze with Claude AI
-   - 📤 Send formatted report to Telegram
-   
-   **No parameters needed, no server running, just pure analysis!**
 
-## Usage Modes
+The app will:
+- 📥 Fetch last 31 days from Monobank
+- 💾 Save transactions to local SQLite database
+- 🤖 Analyze with Claude AI
+- 📤 Send report to Telegram
 
-### Local Analysis Mode (Default)
+**That's it! No server needed, no parameters required.**
+
+## Usage
+
+### Default Mode: One-Shot Analysis
 ```bash
 .\finance-bot.exe
 ```
-Runs once, analyzes 31 days, sends report to Telegram, exits. Perfect for daily use.
+Analyzes last 31 days, updates local database, sends report to Telegram, then exits. Perfect for:
+- Running manually whenever needed
+- Scheduling with Windows Task Scheduler or cron
+- Daily reports via system scheduler
 
-### HTTP Server Mode (For Deployment)
+### Advanced: HTTP Server Mode
 ```bash
 SERVER=1 .\finance-bot.exe
 ```
-Starts HTTP server on port 8080. Available endpoints:
+Starts HTTP server on port 8080 for programmatic triggering.
 
-#### `/health`
-```
-GET /health
-```
-Liveness check. Returns `OK` with HTTP 200 (for deployment monitoring).
-
-#### `/sync?days=31`
-```
-GET /sync?days=31
-```
-Manually trigger sync and analysis. Useful for Fly.io Machines scheduler.
-
-**Query Parameters:**
-- `days` (optional): Number of days to analyze (default: 7, max: 31)
-
-**Response:**
-- `200 OK`: "Synchronization successful! Report sent to Telegram."
-- `503 Service Unavailable`: Missing environment variables
-- `400 Bad Request`: Invalid parameters
+**Endpoints:**
+- `GET /health` - Returns `OK` (liveness check)
+- `GET /sync?days=7` - Trigger analysis for N days (1-31)
 
 ## Telegram Commands
 
@@ -122,36 +110,35 @@ Manually trigger sync and analysis. Useful for Fly.io Machines scheduler.
 ### Project Structure
 ```
 finance-bot/
-├── main.go                      # HTTP server and request handlers
+├── main.go                      # Core sync & analysis logic
 ├── storage/
 │   └── sqlite.go                # SQLite database layer
 ├── monobank/
-│   ├── client.go                # Monobank API integration
-│   └── mcc.go                   # Merchant category mapping
+│   ├── client.go                # Monobank API client
+│   └── mcc.go                   # Merchant category codes
 ├── telegram/
 │   └── client.go                # Telegram Bot API client
 ├── llm/
-│   └── client.go                # Google Gemini AI integration
-├── fly.toml                     # Fly.io configuration
-├── FLY_DEPLOYMENT.md            # Deployment guide
-├── CLAUDE.md                    # Development guidelines
-├── .env.example                 # Environment template
+│   └── client.go                # Claude API integration
+├── CLAUDE.md                    # Development guide
+├── .env.example                 # Configuration template
+├── .gitignore                   # Git ignore rules
 └── README.md                    # This file
 ```
 
-### Synchronization Flow
+### How It Works
 
-**Manual Sync (Anytime):**
-1. User/Scheduler makes HTTP request to `GET /sync?days=7`
-2. App fetches transactions from Monobank
-3. App analyzes with Gemini AI
-4. Results saved to database
-5. Report sent to Telegram
+1. **Run the app** - `.\finance-bot.exe`
+2. **Fetch from Monobank** - Pulls last 31 days of transactions
+3. **Save to Database** - SQLite stores transactions (no duplicates)
+4. **Analyze** - Claude AI processes entire current month's data
+5. **Send Report** - Telegram receives formatted analysis
+6. **Exit** - App finishes and closes
 
-**Scheduled Sync (Daily at 8 AM UTC):**
-- Fly Machines scheduler triggers `/sync` endpoint automatically
-- No internal cron job needed
-- Reliable even if main app restarts
+**Scheduling:**
+- Run manually whenever needed
+- Or schedule with system scheduler (Windows Task Scheduler / cron)
+- Run daily/weekly as preferred
 
 ### Core Components
 
@@ -227,31 +214,32 @@ Reserved for future use (populated but currently unused):
 
 ## Development
 
-### Building from Source
+### Build
 ```bash
-go build -o finance-bot main.go
+go build -o finance-bot.exe main.go
 ```
 
-### Running with Live Code Changes
+### Run with Code Changes
 ```bash
 go run main.go
 ```
 
-### Environment Variables for Development
-Create a `.env` file with test credentials (see `.env.example`).
+### Testing Locally
+1. Set up `.env` with test API keys
+2. Run: `go run main.go`
+3. Check logs to verify:
+   - Monobank connection ✓
+   - Claude AI connection ✓
+   - Telegram delivery ✓
 
-### Testing Endpoints Locally
+### Debug Mode: HTTP Server
 ```bash
-# Health check
+SERVER=1 go run main.go
+```
+Then test manually:
+```bash
 curl http://localhost:8080/health
-
-# Trigger sync
 curl http://localhost:8080/sync?days=7
-
-# Test Telegram webhook
-curl -X POST http://localhost:8080/telegram/webhook \
-  -H "Content-Type: application/json" \
-  -d '{"update_id":1,"message":{"message_id":1,"text":"/status","chat":{"id":YOUR_CHAT_ID}}}'
 ```
 
 ### Code Conventions
@@ -264,39 +252,23 @@ curl -X POST http://localhost:8080/telegram/webhook \
 - **No CGO**: Uses `modernc.org/sqlite` (pure Go driver) for cross-platform compatibility
 - **API Limits**: Monobank statement requests are limited to 31 days per request; the app enforces this automatically
 
-## Deployment
+## Scheduling Analysis
 
-### Option 1: Local Use (Recommended for Personal Use)
-Simply run the exe regularly:
-```bash
-.\finance-bot.exe  # Or schedule with Windows Task Scheduler / cron
+### Windows: Task Scheduler
+Create a scheduled task to run daily:
+```powershell
+$trigger = New-ScheduledTaskTrigger -Daily -At 8:00am
+$action = New-ScheduledTaskAction -Execute "C:\path\to\finance-bot.exe"
+Register-ScheduledTask -TaskName "FinanceBot Daily" -Trigger $trigger -Action $action
 ```
 
-### Option 2: Fly.io (Cloud Deployment)
-
-For detailed instructions, see [FLY_DEPLOYMENT.md](FLY_DEPLOYMENT.md).
-
-**Quick start:**
+### Linux/macOS: Cron
+Add to crontab:
 ```bash
-# Set environment variables
-flyctl secrets set \
-  MONOBANK_TOKEN=your_token \
-  MONOBANK_ACCOUNT_ID=your_account \
-  TELEGRAM_BOT_TOKEN=your_bot_token \
-  TELEGRAM_CHAT_ID=your_chat_id \
-  ANTHROPIC_API_KEY=your_key \
-  SERVER=1
-
-# Create volume for database persistence
-flyctl volumes create finance_db --size 1
-
-# Deploy with: flyctl deploy
+0 8 * * * cd /path/to/finance-bot && ./finance-bot
 ```
 
-**Auto-scheduling with Fly Machines:**
-- Triggers `GET /sync?days=31` daily at 8 AM UTC
-- Reliable even if main app restarts
-- See [FLY_DEPLOYMENT.md](FLY_DEPLOYMENT.md) for complete setup
+Runs daily at 8 AM and sends Telegram report.
 
 
 ## Configuration
@@ -315,25 +287,24 @@ flyctl volumes create finance_db --size 1
 1. Get your API key from https://console.anthropic.com/
 2. Set `ANTHROPIC_API_KEY` in `.env`
 
-### Monthly Income (Optional but Recommended)
-Set your monthly income for accurate budget projections:
-```bash
-# Via Telegram command (if running as server):
-/setincome 15500000  # (amounts in kopiykas; 155,000 UAH in this example)
-
-# Or directly in database:
-sqlite3 finance-bot.db "INSERT OR REPLACE INTO settings VALUES('monthly_income', '15500000');"
+### Monthly Income & Savings
+Set these in `.env` for accurate budget projections:
+```env
+MONTHLY_INCOME=15500000        # Your monthly income in kopiykas
+MANDATORY_SAVINGS=800000       # Monthly savings target in kopiykas
 ```
 
-## Future Roadmap
+These values are loaded at startup and automatically saved to the local database.
+
+## Future Enhancements
 
 - [ ] Unit tests with mocks for all packages
-- [ ] Populate and utilize the `monthly_stats` table for historical analysis
-- [ ] Direct Telegram command processing (implement `/sync` and `/stats` as Telegram commands)
-- [ ] Spending forecast (predict budget deficit dates)
-- [ ] Multi-language support
-- [ ] Mobile app integration (display charts, detailed analytics)
-- [ ] Advanced filtering and search in transaction history
+- [ ] Historical spending trends (compare month-to-month changes)
+- [ ] Spending forecast (predict when you hit annual budget limits)
+- [ ] Mobile app dashboard (view reports on phone)
+- [ ] Transaction search and filtering interface
+- [ ] Budget alerts when approaching limits
+- [ ] Multi-account support (analyze multiple Monobank accounts)
 
 ## Troubleshooting
 
@@ -357,12 +328,12 @@ sqlite3 finance-bot.db "INSERT OR REPLACE INTO settings VALUES('monthly_income',
 
 ## License
 
-This project is provided as-is for personal use. Ensure you comply with Monobank, Telegram, and Google's terms of service when using this bot.
+Personal use. Ensure compliance with Monobank, Telegram, and Anthropic terms of service.
 
 ## Support
 
-For issues, improvements, or questions, please open an issue in the repository.
+For issues or questions, open an issue in the repository.
 
 ---
 
-**Built with Go** • **Powered by Monobank + Telegram + Google Gemini**
+**Built with Go** • **Monobank + Telegram + Claude AI**
