@@ -184,9 +184,9 @@ type BudgetStatus struct {
 	RemainingCents         int64
 	DaysLeftInMonth        int
 	SuggestedDailyLimit    int64
-	MandatorySavingsCents  int64 // ОВДП + батьки = 800000 копійок (8000 UAH)
-	MonthlyBalanceCents    int64 // дохід - видатки - обов'язкові - відрахування
-	ProjectedYearlyBalance int64 // місячний баланс * 12
+	MandatorySavingsCents  int64 // Mandatory savings = 800000 kopiykas (8000 UAH)
+	MonthlyBalanceCents    int64 // Income - expenses - obligations - mandatory savings
+	ProjectedYearlyBalance int64 // Monthly balance * 12
 }
 
 // CalculateBudgetStatus calculates how much money remains for the month considering
@@ -232,14 +232,27 @@ func (app *App) CalculateBudgetStatus(now time.Time) (BudgetStatus, error) {
 	}
 	status.ApprovedPlannedCents = approvedPlanned
 
-	status.MandatorySavingsCents = 800000 // 8000 UAH: ОВДП (4000) + батьки (4000)
+	// Read mandatory savings from settings (default: 800000 = 8000 UAH)
+	mandatorySavingsStr, found, err := app.storage.GetSetting("mandatory_savings")
+	if err != nil {
+		return status, fmt.Errorf("error reading mandatory savings: %w", err)
+	}
+	if found {
+		if val, err := strconv.ParseInt(mandatorySavingsStr, 10, 64); err == nil {
+			status.MandatorySavingsCents = val
+		} else {
+			status.MandatorySavingsCents = 800000
+		}
+	} else {
+		status.MandatorySavingsCents = 800000
+	}
 
 	status.RemainingCents = status.MonthlyIncomeCents - status.ObligationsCents - status.SpentCents - status.ApprovedPlannedCents
 
-	// Місячний баланс після обов'язкових видатків та відрахувань
+	// Monthly balance after obligations and mandatory savings
 	status.MonthlyBalanceCents = status.MonthlyIncomeCents - status.ObligationsCents - status.SpentCents - status.MandatorySavingsCents
 
-	// Річний прогноз на основі поточного місячного балансу
+	// Annual forecast based on current monthly balance
 	status.ProjectedYearlyBalance = status.MonthlyBalanceCents * 12
 
 	totalDaysInMonth := int(monthEnd.Sub(monthStart).Hours() / 24)
@@ -328,36 +341,36 @@ func aggregateByCategory(txs []storage.Transaction) []CategorySpending {
 // planned one-time expenses so that the AI advice takes into account the full picture, not just a list of purchases.
 func (app *App) buildAnalysisPrompt(txs []storage.Transaction, status BudgetStatus, obligations []storage.Obligation, pendingPlanned []storage.PlannedExpense) string {
 	var sb strings.Builder
-	sb.WriteString("Ти персональний фінансовий консультант для сім'ї (2 дорослих + дитина + тварини).\n")
-	sb.WriteString("Твоя мета: 1) Оцінити чи користувач вкладається в річний бюджет (має бути ПЛЮС або 0, не мінус). 2) Проаналізувати видатки по категоріям. 3) Знайти де користувач витрачає БАГАТО і дати конкретні рекомендації.\n")
-	sb.WriteString("Дохід: $3500/мес. Обов'язкові щомісячні: ОВДП 4000 + батьки 4000 = 8000 UAH.\n")
-	sb.WriteString("Якщо видатки зростають по категоріям - це RED FLAG, треба скорочувати.\n")
-	sb.WriteString("Будь КРИТИЧНИМ і КОНКРЕТНИМ. Форматуй Markdown для Telegram, без зайвої багатослівності.\n\n")
+	sb.WriteString("You are a personal financial advisor for a family (2 adults + 1 child + pets).\n")
+	sb.WriteString("Your goal: 1) Assess if the user stays within annual budget (should be PLUS or 0, not minus). 2) Analyze spending by categories. 3) Find areas of excessive spending and provide concrete recommendations.\n")
+	sb.WriteString("Income: ~$3500/month. Mandatory monthly savings: $8000 UAH (investment fund + family support).\n")
+	sb.WriteString("If spending is growing by category - RED FLAG, needs cutting.\n")
+	sb.WriteString("Be CRITICAL and SPECIFIC. Format as Markdown for Telegram, concise and direct. Write in Ukranian\n\n")
 
 	if status.HasIncome {
-		sb.WriteString("### Аналіз бюджету\n")
-		sb.WriteString(fmt.Sprintf("- **Дохід на місяць:** %.2f UAH\n", float64(status.MonthlyIncomeCents)/100))
-		sb.WriteString(fmt.Sprintf("- **Видатки цього місяця:** %.2f UAH\n", float64(status.SpentCents)/100))
-		sb.WriteString(fmt.Sprintf("- **Обов'язкові платежі:** %.2f UAH\n", float64(status.ObligationsCents)/100))
-		sb.WriteString(fmt.Sprintf("- **Обов'язкові відрахування (ОВДП + батьки):** %.2f UAH\n", float64(status.MandatorySavingsCents)/100))
+		sb.WriteString("### Budget Analysis\n")
+		sb.WriteString(fmt.Sprintf("- **Monthly Income:** %.2f UAH\n", float64(status.MonthlyIncomeCents)/100))
+		sb.WriteString(fmt.Sprintf("- **Spent This Month:** %.2f UAH\n", float64(status.SpentCents)/100))
+		sb.WriteString(fmt.Sprintf("- **Mandatory Payments:** %.2f UAH\n", float64(status.ObligationsCents)/100))
+		sb.WriteString(fmt.Sprintf("- **Mandatory Savings (investment + family):** %.2f UAH\n", float64(status.MandatorySavingsCents)/100))
 		if status.ApprovedPlannedCents > 0 {
-			sb.WriteString(fmt.Sprintf("- **Затверджені планові видатки:** %.2f UAH\n", float64(status.ApprovedPlannedCents)/100))
+			sb.WriteString(fmt.Sprintf("- **Approved Planned Expenses:** %.2f UAH\n", float64(status.ApprovedPlannedCents)/100))
 		}
 		sb.WriteString("\n")
 
-		sb.WriteString("### Місячний баланс\n")
-		sb.WriteString(fmt.Sprintf("- **Залишок після всього:** %.2f UAH\n", float64(status.MonthlyBalanceCents)/100))
+		sb.WriteString("### Monthly Balance\n")
+		sb.WriteString(fmt.Sprintf("- **Balance After All Deductions:** %.2f UAH\n", float64(status.MonthlyBalanceCents)/100))
 		if status.MonthlyBalanceCents > 0 {
-			sb.WriteString(fmt.Sprintf("- ✅ **Річний прогноз:** +%.2f UAH (плюс, якщо видатки такі ж кожен місяць)\n", float64(status.ProjectedYearlyBalance)/100))
+			sb.WriteString(fmt.Sprintf("- ✅ **Annual Forecast:** +%.2f UAH (surplus if spending stays the same)\n", float64(status.ProjectedYearlyBalance)/100))
 		} else {
-			sb.WriteString(fmt.Sprintf("- ⚠️ **УВАГА: Річний прогноз:** %.2f UAH (МІНУС! Треба скорочувати видатки!)\n", float64(status.ProjectedYearlyBalance)/100))
+			sb.WriteString(fmt.Sprintf("- ⚠️ **WARNING: Annual Forecast:** %.2f UAH (DEFICIT! Need to cut expenses!)\n", float64(status.ProjectedYearlyBalance)/100))
 		}
 		sb.WriteString("\n")
 
 		// Analyze spending by category
 		categories := aggregateByCategory(txs)
 		if len(categories) > 0 {
-			sb.WriteString("### Аналіз видатків по категоріям\n")
+			sb.WriteString("### Spending by Category\n")
 			totalSpent := int64(0)
 			for _, c := range categories {
 				totalSpent += c.Amount
@@ -370,31 +383,31 @@ func (app *App) buildAnalysisPrompt(txs []storage.Transaction, status BudgetStat
 				if totalSpent > 0 {
 					percentage = float64(c.Amount) / float64(totalSpent) * 100
 				}
-				sb.WriteString(fmt.Sprintf("- **%s:** %.2f UAH (%.0f%%, %d операцій)\n", c.Category, float64(c.Amount)/100, percentage, c.Count))
+				sb.WriteString(fmt.Sprintf("- **%s:** %.2f UAH (%.0f%%, %d transactions)\n", c.Category, float64(c.Amount)/100, percentage, c.Count))
 			}
 			sb.WriteString("\n")
 		}
 	} else {
-		sb.WriteString("### Бюджет\nМісячний дохід не встановлено, тому оцінюю ситуацію на основі видатків.\n\n")
+		sb.WriteString("### Budget\nMonthly income not set. Analyzing based on available spending data.\n\n")
 	}
 
 	if len(obligations) > 0 {
-		sb.WriteString("### Обов'язкові платежі цього місяця\n")
+		sb.WriteString("### Mandatory Payments This Month\n")
 		for _, o := range obligations {
-			sb.WriteString(fmt.Sprintf("- %s: %.2f UAH (дата: %s)\n", o.Name, float64(o.Amount)/100, o.NextDueDate))
+			sb.WriteString(fmt.Sprintf("- %s: %.2f UAH (due: %s)\n", o.Name, float64(o.Amount)/100, o.NextDueDate))
 		}
 		sb.WriteString("\n")
 	}
 
 	if len(pendingPlanned) > 0 {
-		sb.WriteString("### Планові одноразові видатки, що чекають підтвердження\n")
+		sb.WriteString("### Planned One-Time Expenses Pending Approval\n")
 		for _, p := range pendingPlanned {
 			sb.WriteString(fmt.Sprintf("- %s: %.2f UAH\n", p.Name, float64(p.Amount)/100))
 		}
 		sb.WriteString("\n")
 	}
 
-	sb.WriteString("### Операції\n")
+	sb.WriteString("### Transactions\n")
 	for _, tx := range txs {
 		amountFormatted := float64(tx.Amount) / 100.0
 		sign := "-"
@@ -413,6 +426,15 @@ func (app *App) buildAnalysisPrompt(txs []storage.Transaction, status BudgetStat
 
 // settingMonthlyIncome is the key in the settings table for expected monthly income (in kopiykas)
 const settingMonthlyIncome = "monthly_income"
+
+// parseOrZero safely parses a string to int64, returns 0 if parsing fails
+func parseOrZero(s string) int64 {
+	val, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return val
+}
 
 // parseAmountToCents converts an amount entered by the user (e.g. "45000" or "45000.50") to kopiykas
 func parseAmountToCents(s string) (int64, error) {
@@ -661,6 +683,8 @@ func main() {
 	tgToken := os.Getenv("TELEGRAM_BOT_TOKEN")
 	tgChatID := os.Getenv("TELEGRAM_CHAT_ID")
 	anthropicKey := os.Getenv("ANTHROPIC_API_KEY")
+	monthlyIncomeStr := os.Getenv("MONTHLY_INCOME")
+	mandatorySavingsStr := os.Getenv("MANDATORY_SAVINGS")
 
 	// Check for required environment variables
 	var missing []string
@@ -679,6 +703,9 @@ func main() {
 	if anthropicKey == "" {
 		missing = append(missing, "ANTHROPIC_API_KEY")
 	}
+	if monthlyIncomeStr == "" {
+		missing = append(missing, "MONTHLY_INCOME")
+	}
 
 	var app *App
 	var initErr error
@@ -688,10 +715,36 @@ func main() {
 		if initErr != nil {
 			log.Fatalf("Error initializing app: %v", initErr)
 		}
-		log.Println("All financial bot modules successfully initialized!")
+		log.Println("✅ Financial bot initialized successfully!")
+
+		// Save monthly income to database from env
+		if err := app.storage.SetSetting(settingMonthlyIncome, monthlyIncomeStr); err != nil {
+			log.Printf("Warning: Could not save monthly income to database: %v", err)
+		}
+
+		// Save mandatory savings to database from env (default 800000 = 8000 UAH)
+		if mandatorySavingsStr == "" {
+			mandatorySavingsStr = "800000"
+		}
+		if err := app.storage.SetSetting("mandatory_savings", mandatorySavingsStr); err != nil {
+			log.Printf("Warning: Could not save mandatory savings to database: %v", err)
+		}
+
+		log.Printf("💰 Monthly income: %.0f UAH", float64(parseOrZero(monthlyIncomeStr))/100)
+		log.Printf("📌 Mandatory savings: %.0f UAH", float64(parseOrZero(mandatorySavingsStr))/100)
 	} else {
-		log.Printf("Warning: Bot started in limited demo mode (not all environment variables present: %s)", strings.Join(missing, ", "))
-		log.Println("Please fill them in for full functionality.")
+		log.Fatalf("Missing required environment variables: %s\nSet them in .env file", strings.Join(missing, ", "))
+	}
+
+	// By default: run sync once for 31 days and exit (perfect for local use)
+	// To run as HTTP server instead, set SERVER=1
+	if os.Getenv("SERVER") == "" {
+		log.Println("📊 Running financial analysis for last 31 days...")
+		if err := app.Sync(31); err != nil {
+			log.Fatalf("❌ Sync failed: %v", err)
+		}
+		log.Println("✅ Analysis complete and report sent to Telegram!")
+		os.Exit(0)
 	}
 
 	// Health check endpoint for deployment monitoring
